@@ -3,9 +3,11 @@ import streamManager from '../services/streamManager.js';
 import { getXtreamUser } from '../services/authService.js';
 import { decrypt } from '../utils/crypto.js';
 import {
+  applyProviderToChannel,
+  ensureUserConnectionAvailable,
+  findAvailableProvider,
   getChannel,
   recordStreamStat,
-  reserveChannelSession,
   shareGuestAllowed
 } from './streamControllerHelpers.js';
 
@@ -34,13 +36,24 @@ export const redirectLive = async (req, res) => {
 
     if (!shareGuestAllowed(user, channel)) return res.sendStatus(403);
 
-    // Preserve the existing provider selection and user connection checks.
-    // No local response resource is registered because IPTV-Manager will not
-    // own the downstream media socket after the redirect.
-    if (!await reserveChannelSession(connectionId, user, channel, req, res, channel.name, {
-      cleanupUser: true,
-      delayMs: 100
-    })) return;
+    // Keep the same cleanup behavior used by the normal Live path for a
+    // repeated request from the same user/IP.
+    await streamManager.cleanupUser(user.id, req.ip);
+
+    if (!await ensureUserConnectionAvailable(user, req.ip, channel.name, channel.provider_id)) {
+      return res.status(403).send('Max connections reached');
+    }
+
+    const availableProvider = await findAvailableProvider(user.id, channel, req.ip, channel.name);
+    if (!availableProvider) {
+      return res.status(403).send('Provider max connections reached across all accounts');
+    }
+
+    applyProviderToChannel(channel, availableProvider);
+
+    // Register the session without a local HTTP response resource. After the
+    // redirect, the actual media connection belongs to the upstream provider.
+    await streamManager.add(connectionId, user, channel.name, req.ip, null, channel.provider_id);
 
     recordStreamStat(channel.provider_channel_id, 'Live Redirect');
 
@@ -48,13 +61,9 @@ export const redirectLive = async (req, res) => {
     const base = channel.provider_url.replace(/\/+$/, '');
     const remoteUrl = `${base}/live/${encodeURIComponent(channel.provider_user)}/${encodeURIComponent(providerPass)}/${channel.remote_stream_id}.ts`;
 
-    // The session is intentionally retained in StreamManager for its normal
-    // stale-session cleanup/connection accounting. There is no local media
-    // resource to destroy because playback continues at the provider.
     res.redirect(302, remoteUrl);
   } catch (e) {
     console.error('Live redirect error:', e.message);
-    streamManager.localStreams.delete(connectionId);
     await streamManager.remove(connectionId);
     if (!res.headersSent) return res.sendStatus(500);
   }
