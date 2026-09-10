@@ -69,10 +69,7 @@ class StreamManager {
       try {
         const json = JSON.stringify(data);
         await this.redis.hSet(REDIS_KEY_STREAMS, id, json);
-        // Set User Index for fast cleanup
         await this.redis.set(`${REDIS_PREFIX_USER}${user.id}:${ip}`, id);
-        // Optional: Expire index after 24h to prevent trash?
-        // Actually, cleanup removes it.
       } catch (e) {
         console.error('Redis Add Error:', e);
       }
@@ -127,7 +124,6 @@ class StreamManager {
   }
 
   async remove(id) {
-    // Kill local resource if exists
     const resource = this.localStreams.get(id);
     if (resource) {
       try {
@@ -163,21 +159,15 @@ class StreamManager {
   async cleanupUser(userId, ip) {
     if (this.redis) {
       try {
-        // Check index
         const oldId = await this.redis.get(`${REDIS_PREFIX_USER}${userId}:${ip}`);
-        if (oldId) {
-          // Instead of just deleting from Redis, call remove() to trigger resource kill if local
-          await this.remove(oldId);
-        }
+        if (oldId) await this.remove(oldId);
       } catch (e) {
         console.error('Redis Cleanup Error:', e);
       }
     } else if (this.db) {
       try {
         const row = this.stmtCleanup.get(userId, ip);
-        if (row) {
-          await this.remove(row.id);
-        }
+        if (row) await this.remove(row.id);
       } catch (e) {
         console.error('DB Cleanup Error:', e.message);
       }
@@ -201,9 +191,57 @@ class StreamManager {
       try {
         this.stmtTouch.run(now, id);
       } catch (e) {
-        console.error('DB Touch Error:', e.message);
+        console.error('DB Touch Error:', e);
       }
     }
+  }
+
+  async touchSession(userId, ip, channelName, providerId = null) {
+    if (!userId || !ip || !channelName) return 0;
+
+    const now = Date.now();
+    let touched = 0;
+
+    if (this.redis) {
+      try {
+        const all = await this.getAll();
+        for (const stream of all) {
+          if (
+            stream.user_id === userId &&
+            stream.ip === ip &&
+            stream.channel_name === channelName &&
+            (providerId === null || stream.provider_id === providerId)
+          ) {
+            const json = await this.redis.hGet(REDIS_KEY_STREAMS, stream.id);
+            if (!json) continue;
+            const data = JSON.parse(json);
+            data.last_activity = now;
+            await this.redis.hSet(REDIS_KEY_STREAMS, stream.id, JSON.stringify(data));
+            touched++;
+          }
+        }
+      } catch (e) {
+        console.error('Redis Session Heartbeat Error:', e);
+      }
+      return touched;
+    }
+
+    if (this.db) {
+      try {
+        const rows = providerId === null
+          ? this.db.prepare('SELECT id FROM current_streams WHERE user_id = ? AND ip = ? AND channel_name = ?').all(userId, ip, channelName)
+          : this.db.prepare('SELECT id FROM current_streams WHERE user_id = ? AND ip = ? AND channel_name = ? AND provider_id = ?').all(userId, ip, channelName, providerId);
+
+        for (const row of rows) {
+          this.stmtTouch.run(now, row.id);
+          touched++;
+        }
+      } catch (e) {
+        console.error('DB Session Heartbeat Error:', e);
+      }
+    }
+
+    return touched;
   }
 
   isWorkerAlive(workerPid) {
@@ -248,9 +286,7 @@ class StreamManager {
       try {
         const all = await this.getAll();
         const staleIds = all.filter(stream => this.isStale(stream, now)).map(stream => stream.id);
-        for (const staleId of staleIds) {
-          await this.remove(staleId);
-        }
+        for (const staleId of staleIds) await this.remove(staleId);
       } catch (e) {
         console.error('Redis stale cleanup error:', e);
       }
@@ -261,9 +297,7 @@ class StreamManager {
       try {
         const all = this.stmtGetAll.all();
         const staleIds = all.filter(stream => this.isStale(stream, now)).map(stream => stream.id);
-        for (const staleId of staleIds) {
-          await this.remove(staleId);
-        }
+        for (const staleId of staleIds) await this.remove(staleId);
       } catch (e) {
         console.error('DB stale cleanup error:', e.message);
       }
@@ -277,9 +311,7 @@ class StreamManager {
       try {
         const all = await this.getAll();
         for (const stream of all) {
-          if (stream.worker_pid === workerPid) {
-            await this.remove(stream.id);
-          }
+          if (stream.worker_pid === workerPid) await this.remove(stream.id);
         }
       } catch (e) {
         console.error('Redis worker cleanup error:', e);
@@ -327,19 +359,9 @@ class StreamManager {
 
     if (this.redis) {
       try {
-        // Since we don't have a direct index for count, we filter getAll.
-        // Optimization: Maintain a separate counter in Redis if performance becomes an issue.
         const all = await this.getAll();
         const userStreams = all.filter(s => s.user_id === userId);
-
-        // Smart Counting: Count unique sessions (Content + IP + Provider)
-        // This allows a single user to open multiple connections (sockets) for the same content
-        // on the same IP without consuming multiple "slots".
-        // Optimization: Use template strings instead of JSON.stringify for significantly faster Set operations
-        const uniqueSessions = new Set(userStreams.map(s =>
-          `${s.channel_name}|${s.ip}|${s.provider_id}`
-        ));
-
+        const uniqueSessions = new Set(userStreams.map(s => `${s.channel_name}|${s.ip}|${s.provider_id}`));
         return uniqueSessions.size;
       } catch (e) {
         console.error('Redis Count Error:', e);
@@ -365,11 +387,7 @@ class StreamManager {
       try {
         const all = await this.getAll();
         const providerStreams = all.filter(s => s.provider_id === providerId);
-        // Smart Counting: Count unique sessions (Channel + IP + User)
-        // Optimization: Use template strings instead of JSON.stringify for significantly faster Set operations
-        const uniqueSessions = new Set(providerStreams.map(s =>
-          `${s.channel_name}|${s.ip}|${s.user_id}`
-        ));
+        const uniqueSessions = new Set(providerStreams.map(s => `${s.channel_name}|${s.ip}|${s.user_id}`));
         return uniqueSessions.size;
       } catch (e) {
         console.error('Redis Provider Count Error:', e);
