@@ -3,7 +3,6 @@ import { redirectLive } from '../../src/controllers/liveRedirectController.js';
 import * as authService from '../../src/services/authService.js';
 import * as helpers from '../../src/controllers/streamControllerHelpers.js';
 import streamManager from '../../src/services/streamManager.js';
-import * as cryptoUtils from '../../src/utils/crypto.js';
 
 vi.mock('../../src/services/authService.js');
 vi.mock('../../src/controllers/streamControllerHelpers.js', () => ({
