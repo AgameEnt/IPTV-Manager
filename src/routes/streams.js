@@ -1,6 +1,7 @@
 import express from 'express';
 import * as streamController from '../controllers/streamController.js';
 import { redirectLive } from '../controllers/liveRedirectController.js';
+import { heartbeatLive } from '../controllers/liveHeartbeatController.js';
 
 const router = express.Router();
 
@@ -10,6 +11,7 @@ router.use((req, res, next) => {
 });
 
 router.get('/live/mpd/:username/:password/:stream_id/*mpdPath', streamController.proxyMpd);
+router.get('/live/heartbeat/:username/:password/:stream_id', heartbeatLive);
 router.get('/live/:username/:password/:stream_id.ts', redirectLive);
 router.get(['/live/:username/:password/:stream_id.m3u8', '/live/:username/:password/:stream_id.mp4', '/live/:username/:password/:stream_id.mp3', '/live/:username/:password/:stream_id.aac'], streamController.proxyLive);
 router.get(['/live/segment/:username/:password/seg.ts', '/live/segment/:username/:password/seg.key'], streamController.proxySegment);
